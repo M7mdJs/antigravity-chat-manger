@@ -1,12 +1,13 @@
-"""Export formatting module supporting Markdown, JSON, HTML, and Obsidian formats."""
-
 from datetime import datetime
 import html
 import json
 from pathlib import Path
-from typing import Any
+import shutil
+import sqlite3
+from typing import Any, Optional
 
 from src.models import ConversationMessage, ConversationSummary
+from src.storage import get_base_dirs, get_conversations_dirs
 
 
 def export_markdown(summary: ConversationSummary, messages: list[ConversationMessage], level: str = "full") -> str:
@@ -199,12 +200,6 @@ def export_html(summary: ConversationSummary, messages: list[ConversationMessage
 
 
 def export_database_file(summary: ConversationSummary, dest_path: Path, fmt: str = "db") -> dict[str, Any]:
-    """Export native Antigravity conversation database (.db) or protobuf (.pb) file."""
-    import shutil
-    import sqlite3
-    from src.storage import get_base_dirs, get_conversations_dirs
-
-    # Search for source conversation file on disk
     src_file: Optional[Path] = None
     for cdir in get_conversations_dirs():
         candidate_db = cdir / f"{summary.id}.db"
@@ -229,7 +224,7 @@ def export_database_file(summary: ConversationSummary, dest_path: Path, fmt: str
     if not src_file or not src_file.is_file():
         return {
             "success": False,
-            "error": f"No native database (.db/.pb) file found on disk for session {summary.id[:8]}.",
+            "error": f"No native conversation file found on disk for session {summary.id[:8]}.",
         }
 
     dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -240,8 +235,19 @@ def export_database_file(summary: ConversationSummary, dest_path: Path, fmt: str
             dst_con = sqlite3.connect(dest_path.as_posix())
             with dst_con:
                 src_con.backup(dst_con)
+            dst_con.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            dst_con.execute("PRAGMA journal_mode=DELETE;")
+            dst_con.commit()
             dst_con.close()
             src_con.close()
+
+            for extra in ("-wal", "-shm"):
+                aux = dest_path.with_name(dest_path.name + extra)
+                if aux.exists():
+                    try:
+                        aux.unlink()
+                    except Exception:
+                        pass
         else:
             shutil.copy2(src_file, dest_path)
 

@@ -105,6 +105,7 @@ class AntigravityGUI(ctk.CTk):
         self.active_id: Optional[str] = None
         self.active_summary: Optional[ConversationSummary] = None
         self.active_messages: list[ConversationMessage] = []
+        self.current_app_filter = "All Apps"
         self.current_filter = "All"
         self.search_query = ""
         self.current_tab = "Chat View"
@@ -184,14 +185,32 @@ class AntigravityGUI(ctk.CTk):
         self._build_sidebar_footer(t)
 
     def _build_filter_pills(self, t: dict):
-        pill_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
-        pill_frame.grid(row=2, column=0, padx=14, pady=(0, 4), sticky="w")
+        pill_container = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
+        pill_container.grid(row=2, column=0, padx=14, pady=(0, 4), sticky="ew")
+
+        # Row 1: App Target (All / IDE / v2.0)
+        app_pill_frame = ctk.CTkFrame(pill_container, fg_color="transparent")
+        app_pill_frame.pack(fill="x", pady=(0, 3))
+
+        self._app_filter_btns: dict[str, ctk.CTkButton] = {}
+        for label in ("All Apps", "IDE", "v2.0"):
+            btn = ctk.CTkButton(
+                app_pill_frame, text=label, width=0, height=22, corner_radius=5,
+                font=ctk.CTkFont(size=10, weight="bold"), fg_color="transparent",
+                hover_color=t["bg_row_hover"], text_color=t["text_muted"],
+                command=lambda l=label: self._on_app_filter_changed(l))
+            btn.pack(side="left", padx=(0, 2))
+            self._app_filter_btns[label] = btn
+
+        # Row 2: Source (All / Live API / On Disk)
+        src_pill_frame = ctk.CTkFrame(pill_container, fg_color="transparent")
+        src_pill_frame.pack(fill="x")
 
         self._filter_btns: dict[str, ctk.CTkButton] = {}
         for label in ("All", "Live API", "On Disk"):
             btn = ctk.CTkButton(
-                pill_frame, text=label, width=0, height=24, corner_radius=5,
-                font=ctk.CTkFont(size=11), fg_color="transparent",
+                src_pill_frame, text=label, width=0, height=22, corner_radius=5,
+                font=ctk.CTkFont(size=10), fg_color="transparent",
                 hover_color=t["bg_row_hover"], text_color=t["text_muted"],
                 command=lambda l=label: self._on_filter_changed(l))
             btn.pack(side="left", padx=(0, 2))
@@ -199,7 +218,21 @@ class AntigravityGUI(ctk.CTk):
 
         tk.Frame(self.sidebar_frame, height=1, bg=t["border_sidebar"]).grid(
             row=3, column=0, sticky="ew", padx=0, pady=(4, 0))
+        self._set_active_app_filter("All Apps")
         self._set_active_filter("All")
+
+    def _on_app_filter_changed(self, choice: str):
+        self.current_app_filter = choice
+        self._set_active_app_filter(choice)
+        self._render_conversation_list()
+
+    def _set_active_app_filter(self, label: str):
+        t = self.theme
+        for lbl, btn in self._app_filter_btns.items():
+            if lbl == label:
+                btn.configure(fg_color=t["seg_active_bg"], text_color=t["text_primary"])
+            else:
+                btn.configure(fg_color="transparent", text_color=t["text_muted"])
 
     def _set_active_filter(self, label: str):
         t = self.theme
@@ -319,6 +352,11 @@ class AntigravityGUI(ctk.CTk):
                                         text_color=t["text_muted"])
         self.source_lbl.pack(side="left", padx=(0, 16))
 
+        self.app_lbl = ctk.CTkLabel(meta_row, text="",
+                                     font=ctk.CTkFont(size=10, weight="bold"),
+                                     text_color=t["accent"])
+        self.app_lbl.pack(side="left", padx=(0, 16))
+
         self.ws_lbl = ctk.CTkLabel(meta_row, text="",
                                     font=ctk.CTkFont(size=10),
                                     text_color=t["text_muted"])
@@ -433,13 +471,13 @@ class AntigravityGUI(ctk.CTk):
         threading.Thread(target=self._async_load_data, daemon=True).start()
 
     def _async_load_data(self):
-        connected = self.client.refresh_connection()
-        ep = self.client.endpoint
-        disk_map = scan_disk_conversations()
-        api_items = self.client.get_all_trajectories() if connected else {}
+        self.client.refresh_connection()
+        disk_map = scan_disk_conversations(app_filter="all")
+        api_items = self.client.get_all_trajectories()
 
         merged = dict(disk_map)
         for cid, api_info in api_items.items():
+            app_tgt = api_info.get("app_target", "ide")
             if cid in merged:
                 merged[cid].source = "api"
                 if api_info.get("summary"):
@@ -448,6 +486,9 @@ class AntigravityGUI(ctk.CTk):
                     merged[cid].step_count = api_info["stepCount"]
                 if api_info.get("lastModifiedTime"):
                     merged[cid].last_modified_time = api_info["lastModifiedTime"]
+                if app_tgt and merged[cid].app_target != "both":
+                    if merged[cid].app_target != app_tgt:
+                        merged[cid].app_target = "both"
             else:
                 merged[cid] = ConversationSummary(
                     id=cid,
@@ -456,13 +497,14 @@ class AntigravityGUI(ctk.CTk):
                     step_count=api_info.get("stepCount", 0),
                     last_modified_time=api_info.get("lastModifiedTime"),
                     source="api",
+                    app_target=app_tgt,
                 )
 
         items = list(merged.values())
         items.sort(key=lambda x: x.last_modified_time or "", reverse=True)
-        self.after(0, lambda: self._on_data_loaded(items, connected, ep))
+        self.after(0, lambda: self._on_data_loaded(items))
 
-    def _on_data_loaded(self, items: list[ConversationSummary], connected: bool, ep: Any):
+    def _on_data_loaded(self, items: list[ConversationSummary], *args):
         self.conversations = items
         self._restore_status_label()
         self._render_conversation_list()
@@ -490,10 +532,19 @@ class AntigravityGUI(ctk.CTk):
 
         filtered = []
         for c in self.conversations:
+            # Filter by app target
+            if self.current_app_filter == "IDE" and c.app_target not in ("ide", "both"):
+                continue
+            if self.current_app_filter == "v2.0" and c.app_target not in ("v2", "both"):
+                continue
+
+            # Filter by source
             if self.current_filter == "Live API" and c.source != "api":
                 continue
             if self.current_filter == "On Disk" and c.source != "disk":
                 continue
+
+            # Filter by search query
             if self.search_query:
                 in_title = self.search_query in c.title.lower()
                 in_ws = c.workspace and self.search_query in c.workspace.lower()
@@ -558,7 +609,7 @@ class AntigravityGUI(ctk.CTk):
         title_row = ctk.CTkFrame(content, fg_color="transparent")
         title_row.pack(fill="x", padx=(10, 12), pady=(8, 1))
 
-        clean_title = fix_arabic(c.title[:52])
+        clean_title = fix_arabic(c.title[:50])
         t_lbl = ctk.CTkLabel(
             title_row, text=clean_title,
             font=ctk.CTkFont(size=12, weight="bold" if is_active else "normal"),
@@ -577,7 +628,7 @@ class AntigravityGUI(ctk.CTk):
         if c.workspace:
             sub_text = c.workspace.replace("\\", "/").split("/")[-1]
         elif c.preview and not c.preview.startswith("file:"):
-            sub_text = c.preview[:50]
+            sub_text = c.preview[:45]
         else:
             sub_text = c.id[:14]
 
@@ -586,15 +637,22 @@ class AntigravityGUI(ctk.CTk):
                               text_color=t["text_muted"], anchor="w")
         p_lbl.pack(side="left")
 
+        # Right metadata elements: App Badge, Step count, Source
+        src_color = t["status_green"] if c.source == "api" else t["text_faint"]
+        ctk.CTkLabel(sub_row, text=c.source.upper(),
+                     font=ctk.CTkFont(size=9),
+                     text_color=src_color).pack(side="right")
+
         if c.step_count:
             ctk.CTkLabel(sub_row, text=f"{c.step_count}s",
                          font=ctk.CTkFont(size=9),
                          text_color=t["text_faint"]).pack(side="right", padx=(0, 4))
 
-        src_color = t["status_green"] if c.source == "api" else t["text_faint"]
-        ctk.CTkLabel(sub_row, text=c.source.upper(),
-                     font=ctk.CTkFont(size=9),
-                     text_color=src_color).pack(side="right")
+        app_badge_color = "#818cf8" if c.app_target == "ide" else ("#22d3ee" if c.app_target == "v2" else "#a855f7")
+        app_badge_txt = "IDE" if c.app_target == "ide" else ("v2.0" if c.app_target == "v2" else "BOTH")
+        ctk.CTkLabel(sub_row, text=app_badge_txt,
+                     font=ctk.CTkFont(size=8, weight="bold"),
+                     text_color=app_badge_color).pack(side="right", padx=(0, 4))
 
         # Bottom separator
         tk.Frame(outer, height=1, bg=t["border_sidebar"]).pack(fill="x", side="bottom")
@@ -636,8 +694,17 @@ class AntigravityGUI(ctk.CTk):
         self.steps_badge.configure(text=f"{c.step_count} steps" if c.step_count else "")
         self.id_lbl.configure(text=c.id[:12])
         self.source_lbl.configure(
-            text=c.source,
+            text=c.source.upper(),
             text_color=t["status_green"] if c.source == "api" else t["text_muted"])
+        
+        app_name_map = {
+            "ide": "Antigravity IDE",
+            "v2": "Antigravity 2.0",
+            "both": "IDE & 2.0",
+        }
+        app_badge_color = "#818cf8" if c.app_target == "ide" else ("#22d3ee" if c.app_target == "v2" else "#a855f7")
+        self.app_lbl.configure(text=app_name_map.get(c.app_target, c.app_target), text_color=app_badge_color)
+
         ws_name = c.workspace.replace("\\", "/").split("/")[-1] if c.workspace else ""
         self.ws_lbl.configure(text=ws_name)
 
@@ -691,10 +758,10 @@ class AntigravityGUI(ctk.CTk):
     def _fetch_messages(self, summary: ConversationSummary) -> list[ConversationMessage]:
         try:
             if summary.source == "api":
-                raw = self.client.get_trajectory(summary.id)
+                raw = self.client.get_trajectory(summary.id, app=summary.app_target)
                 if raw:
                     return parse_api_trajectory(raw)
-            lines = read_transcript_lines(summary.id)
+            lines = read_transcript_lines(summary.id, app_target=summary.app_target)
             if lines:
                 return parse_transcript_records(lines)
         except Exception:
@@ -1023,14 +1090,26 @@ class AntigravityGUI(ctk.CTk):
         self.after(2000, self._restore_status_label)
 
     def _restore_status_label(self):
-        connected = self.client.is_connected()
-        ep = self.client.endpoint
-        if connected and ep:
-            self.status_lbl.configure(
-                text=f"live · {ep.port}", text_color=self.theme["status_green"])
+        status = self.client.get_status()
+        ide_st = status.get("ide", {})
+        v2_st = status.get("v2", {})
+        ide_ok = ide_st.get("connected", False)
+        v2_ok = v2_st.get("connected", False)
+
+        parts = []
+        if ide_ok:
+            parts.append(f"IDE: {ide_st.get('port')}")
+        if v2_ok:
+            parts.append(f"2.0: {v2_st.get('port')}")
+
+        if ide_ok and v2_ok:
+            self.status_lbl.configure(text=" · ".join(parts), text_color=self.theme["status_green"])
+        elif ide_ok:
+            self.status_lbl.configure(text=f"{parts[0]} · 2.0: off", text_color=self.theme["status_green"])
+        elif v2_ok:
+            self.status_lbl.configure(text=f"IDE: off · {parts[0]}", text_color=self.theme["status_green"])
         else:
-            self.status_lbl.configure(
-                text="offline", text_color=self.theme["status_amber"])
+            self.status_lbl.configure(text="offline", text_color=self.theme["status_amber"])
 
     def _copy_as_markdown(self):
         if not self.active_summary:
@@ -1088,6 +1167,17 @@ class AntigravityGUI(ctk.CTk):
             filetypes=[
                 ("Supported Formats (*.db, *.pb, *.json)", "*.db;*.pb;*.json"),
                 ("SQLite Databases (*.db)", "*.db"),
+                ("Protobuf Files (*.pb)", "*.pb"),
+                ("JSON Exports (*.json)", "*.json"),
+                ("All Files", "*.*"),
+            ])
+    def _open_import_dialog(self):
+        file_path = filedialog.askopenfilename(
+            title="Import Conversation",
+            filetypes=[
+                ("Supported Formats (*.db, *.pb, *.json)", "*.db;*.pb;*.json"),
+                ("SQLite Databases (*.db)", "*.db"),
+                ("Protobuf Files (*.pb)", "*.pb"),
                 ("JSON Exports (*.json)", "*.json"),
                 ("All Files", "*.*"),
             ])
@@ -1095,18 +1185,78 @@ class AntigravityGUI(ctk.CTk):
             return
         p = Path(file_path)
         ext = p.suffix.lower()
-        if ext in (".db", ".pb"):
-            res = import_database_file(p, self.client)
-        elif ext == ".json":
-            res = import_json_export(p)
-        else:
+        if ext not in (".db", ".pb", ".json"):
             messagebox.showerror("Error", f"Unsupported file type: {ext}")
             return
+
+        dialog = ImportAppSelectDialog(self)
+        self.wait_window(dialog)
+        if not dialog.choice:
+            return
+
+        target_app = dialog.choice
+        if ext in (".db", ".pb"):
+            res = import_database_file(p, self.client, target_app=target_app)
+        else:
+            res = import_json_export(p, target_app=target_app)
+
         if res.get("success"):
             messagebox.showinfo("Import Success", res.get("message", "Import completed!"))
             self._refresh_all()
         else:
             messagebox.showerror("Import Error", res.get("error", "Failed importing file."))
+
+
+class ImportAppSelectDialog(ctk.CTkToplevel):
+    def __init__(self, master: "AntigravityGUI"):
+        super().__init__(master)
+        self.choice: Optional[str] = None
+        t = master.theme
+        self.title("Select Target Antigravity Application")
+        self.geometry("440x210")
+        self.resizable(False, False)
+        self.configure(fg_color=t["bg_window"])
+        self.transient(master)
+        self.grab_set()
+
+        hdr = ctk.CTkFrame(self, fg_color=t["bg_sidebar"], corner_radius=0)
+        hdr.pack(fill="x")
+        tk.Frame(hdr, height=1, bg=t["border_sidebar"]).pack(side="bottom", fill="x")
+        ctk.CTkLabel(hdr, text="Import Destination", font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=t["text_primary"]).pack(padx=16, pady=(12, 2), anchor="w")
+        ctk.CTkLabel(hdr, text="Choose which Antigravity app should register this conversation.",
+                     font=ctk.CTkFont(size=10), text_color=t["text_muted"]).pack(padx=16, pady=(0, 10), anchor="w")
+
+        btn_box = ctk.CTkFrame(self, fg_color="transparent")
+        btn_box.pack(fill="both", expand=True, padx=20, pady=16)
+
+        def pick(val: str):
+            self.choice = val
+            self.destroy()
+
+        ctk.CTkButton(
+            btn_box, text="Both Applications (Recommended)", fg_color=t["accent"],
+            hover_color=t["accent_hover"], text_color="#ffffff",
+            font=ctk.CTkFont(size=11, weight="bold"), height=32, corner_radius=6,
+            command=lambda: pick("both")).pack(fill="x", pady=(0, 8))
+
+        row = ctk.CTkFrame(btn_box, fg_color="transparent")
+        row.pack(fill="x")
+        row.grid_columnconfigure((0, 1), weight=1)
+
+        ctk.CTkButton(
+            row, text="Antigravity IDE", fg_color=t["bg_card"],
+            hover_color=t["bg_card_hover"], text_color=t["text_primary"],
+            border_color=t["border_subtle"], border_width=1,
+            font=ctk.CTkFont(size=11), height=30, corner_radius=6,
+            command=lambda: pick("ide")).grid(row=0, column=0, padx=(0, 4), sticky="ew")
+
+        ctk.CTkButton(
+            row, text="Antigravity 2.0", fg_color=t["bg_card"],
+            hover_color=t["bg_card_hover"], text_color=t["text_primary"],
+            border_color=t["border_subtle"], border_width=1,
+            font=ctk.CTkFont(size=11), height=30, corner_radius=6,
+            command=lambda: pick("v2")).grid(row=0, column=1, padx=(4, 0), sticky="ew")
 
 
 # ── Recovery Dialog ───────────────────────────────────────────────────────────
@@ -1118,19 +1268,20 @@ class RecoveryDialog(ctk.CTkToplevel):
         t = master.theme
 
         self.title("Recover Unindexed Conversations")
-        self.geometry("560x440")
-        self.minsize(480, 360)
+        self.geometry("580x480")
+        self.minsize(500, 400)
         self.configure(fg_color=t["bg_window"])
         self.transient(master)
         self.grab_set()
 
+        self.recovery_target = "both"
         self._build_ui()
         threading.Thread(target=self._scan, daemon=True).start()
 
     def _build_ui(self):
         t = self.master_app.theme
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=1)
+        self.grid_rowconfigure(3, weight=1)
 
         hdr = ctk.CTkFrame(self, fg_color=t["bg_sidebar"], corner_radius=0)
         hdr.grid(row=0, column=0, sticky="ew")
@@ -1143,9 +1294,28 @@ class RecoveryDialog(ctk.CTkToplevel):
                      font=ctk.CTkFont(size=10),
                      text_color=t["text_muted"]).pack(padx=16, pady=(0, 10), anchor="w")
 
+        # Target app selector
+        app_selector_frame = ctk.CTkFrame(self, fg_color="transparent")
+        app_selector_frame.grid(row=1, column=0, padx=16, pady=(10, 2), sticky="ew")
+
+        ctk.CTkLabel(app_selector_frame, text="Target App:",
+                     font=ctk.CTkFont(size=11, weight="bold"),
+                     text_color=t["text_primary"]).pack(side="left", padx=(0, 8))
+
+        self._rec_btns: dict[str, ctk.CTkButton] = {}
+        for label, val in [("Both (IDE & 2.0)", "both"), ("Antigravity IDE", "ide"), ("Antigravity 2.0", "v2")]:
+            btn = ctk.CTkButton(
+                app_selector_frame, text=label, width=0, height=24, corner_radius=5,
+                font=ctk.CTkFont(size=11), fg_color=t["seg_active_bg"] if val == "both" else "transparent",
+                hover_color=t["bg_row_hover"],
+                text_color=t["text_primary"] if val == "both" else t["text_muted"],
+                command=lambda v=val: self._on_target_changed(v))
+            btn.pack(side="left", padx=(0, 4))
+            self._rec_btns[val] = btn
+
         stats = ctk.CTkFrame(self, fg_color=t["bg_card"],
                               border_color=t["border_card"], border_width=1, corner_radius=6)
-        stats.grid(row=1, column=0, padx=16, pady=10, sticky="ew")
+        stats.grid(row=2, column=0, padx=16, pady=8, sticky="ew")
         stats.grid_columnconfigure((0, 1, 2), weight=1)
         self.m_disk = self._metric(stats, 0, "On Disk", "0")
         self.m_api  = self._metric(stats, 1, "In LanguageServer", "0")
@@ -1156,13 +1326,13 @@ class RecoveryDialog(ctk.CTkToplevel):
                                        font=ctk.CTkFont(family="Consolas", size=10),
                                        corner_radius=6, border_color=t["border_card"],
                                        border_width=1)
-        self.log_box.grid(row=2, column=0, padx=16, pady=(0, 8), sticky="nsew")
+        self.log_box.grid(row=3, column=0, padx=16, pady=(0, 8), sticky="nsew")
 
         footer = ctk.CTkFrame(self, fg_color="transparent")
-        footer.grid(row=3, column=0, padx=16, pady=(0, 14), sticky="ew")
+        footer.grid(row=4, column=0, padx=16, pady=(0, 14), sticky="ew")
 
         self.start_btn = ctk.CTkButton(
-            footer, text="Reactivate All Sessions",
+            footer, text="Reactivate Sessions",
             fg_color=t["accent"], hover_color=t["accent_hover"],
             text_color="#ffffff", font=ctk.CTkFont(size=12, weight="bold"),
             command=self._start_recovery, height=30, corner_radius=6)
@@ -1187,20 +1357,32 @@ class RecoveryDialog(ctk.CTkToplevel):
                      text_color=t["text_muted"]).pack()
         return v
 
+    def _on_target_changed(self, val: str):
+        self.recovery_target = val
+        t = self.master_app.theme
+        for k, btn in self._rec_btns.items():
+            if k == val:
+                btn.configure(fg_color=t["seg_active_bg"], text_color=t["text_primary"])
+            else:
+                btn.configure(fg_color="transparent", text_color=t["text_muted"])
+        self.log_box.delete("1.0", "end")
+        threading.Thread(target=self._scan, daemon=True).start()
+
     def _scan(self):
         engine = self.master_app.recovery_engine
-        res = engine.scan_unindexed()
+        res = engine.scan_unindexed(target_app=self.recovery_target)
         def _update():
             self.m_disk.configure(text=str(res["total_disk"]))
             self.m_api.configure(text=str(res["total_api"]))
             self.m_lost.configure(text=str(res["unindexed_count"]))
             self.unindexed_ids = res["unindexed_ids"]
+            target_name = "Both (IDE & 2.0)" if self.recovery_target == "both" else ("Antigravity 2.0" if self.recovery_target == "v2" else "Antigravity IDE")
             if not res["connected"]:
                 self.log_box.insert("end",
-                    "Notice: LanguageServer is offline.\nYou can browse and export sessions offline.\n\n")
+                    f"Notice: LanguageServer for {target_name} is offline.\nYou can still browse and export sessions offline.\n\n")
             else:
                 self.log_box.insert("end",
-                    f"Discovered {len(self.unindexed_ids)} sessions ready for reactivation.\n\n")
+                    f"Target: {target_name}\nDiscovered {len(self.unindexed_ids)} sessions ready for reactivation.\n\n")
         self.after(0, _update)
 
     def _start_recovery(self):
@@ -1213,7 +1395,7 @@ class RecoveryDialog(ctk.CTkToplevel):
             self.after(0, lambda: self.log_box.insert(
                 "end", f"[{current}/{total}] {cid[:8]}...\n"))
             self.after(0, lambda: self.log_box.see("end"))
-        res = engine.run_recovery(progress_callback=progress)
+        res = engine.run_recovery(target_app=self.recovery_target, progress_callback=progress)
         self.after(0, lambda: self._on_done(res))
 
     def _on_done(self, res: dict):

@@ -1,4 +1,4 @@
-"""Local storage inspector and offline conversation reader for Antigravity."""
+"""Local storage inspector and offline conversation reader for Antigravity (IDE & 2.0)."""
 
 import base64
 from datetime import datetime, timezone
@@ -12,19 +12,27 @@ from typing import Any, Optional
 
 from src.models import ConversationSummary
 
+BASE_DIR_IDE = Path.home() / ".gemini" / "antigravity-ide"
+BASE_DIR_V2 = Path.home() / ".gemini" / "antigravity"
+
+
+def get_app_dirs() -> list[tuple[Path, str]]:
+    """Returns list of (base_path, app_tag) for installed Antigravity versions."""
+    res: list[tuple[Path, str]] = []
+    if BASE_DIR_IDE.exists() and BASE_DIR_IDE.is_dir():
+        res.append((BASE_DIR_IDE, "ide"))
+    if BASE_DIR_V2.exists() and BASE_DIR_V2.is_dir():
+        res.append((BASE_DIR_V2, "v2"))
+    return res
+
 
 def get_base_dirs() -> list[Path]:
-    home = Path.home()
-    candidates = [
-        home / ".gemini" / "antigravity-ide",
-        home / ".gemini" / "antigravity",
-    ]
-    return [p for p in candidates if p.exists() and p.is_dir()]
+    return [p for p, _ in get_app_dirs()]
 
 
 def get_conversations_dirs() -> list[Path]:
     dirs = []
-    for base in get_base_dirs():
+    for base, _ in get_app_dirs():
         p = base / "conversations"
         if p.exists() and p.is_dir():
             dirs.append(p)
@@ -33,14 +41,22 @@ def get_conversations_dirs() -> list[Path]:
 
 def get_brain_dirs() -> list[Path]:
     dirs = []
-    for base in get_base_dirs():
+    for base, _ in get_app_dirs():
         p = base / "brain"
         if p.exists() and p.is_dir():
             dirs.append(p)
     return dirs
 
 
+def get_app_target_dir(app_tag: str, subfolder: str = "conversations") -> Path:
+    base = BASE_DIR_V2 if app_tag in ("v2", "antigravity", "2.0") else BASE_DIR_IDE
+    p = base / subfolder
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
 def extract_vscdb_titles() -> dict[str, dict[str, str]]:
+    """Extract titles for Antigravity IDE from globalStorage state.vscdb."""
     db_path = Path.home() / "AppData" / "Roaming" / "Antigravity IDE" / "User" / "globalStorage" / "state.vscdb"
     if not db_path.is_file():
         return {}
@@ -78,6 +94,32 @@ def extract_vscdb_titles() -> dict[str, dict[str, str]]:
 
             if title:
                 metadata[cid] = {"title": title}
+    except Exception:
+        pass
+
+    return metadata
+
+
+def extract_v2_summaries() -> dict[str, dict[str, Any]]:
+    """Extract titles and summaries for Antigravity 2.0 from conversation_summaries.db."""
+    db_path = BASE_DIR_V2 / "conversation_summaries.db"
+    if not db_path.is_file():
+        return {}
+
+    metadata: dict[str, dict[str, Any]] = {}
+    try:
+        con = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=3)
+        cur = con.cursor()
+        for row in cur.execute("SELECT conversation_id, title, preview, step_count, last_modified_time FROM conversation_summaries"):
+            cid, title, preview, steps, mtime = row
+            if cid:
+                metadata[cid] = {
+                    "title": title,
+                    "preview": preview,
+                    "step_count": steps,
+                    "last_modified_time": mtime,
+                }
+        con.close()
     except Exception:
         pass
 
@@ -125,12 +167,23 @@ def read_step_count_and_prompt_from_db(db_path: Path) -> tuple[int, Optional[str
     return step_count, prompt
 
 
-def scan_disk_conversations() -> dict[str, ConversationSummary]:
+def scan_disk_conversations(app_filter: Optional[str] = None) -> dict[str, ConversationSummary]:
     results: dict[str, ConversationSummary] = {}
     vscdb_titles = extract_vscdb_titles()
+    v2_summaries = extract_v2_summaries()
 
-    # Scan conversation files (.db)
-    for conv_dir in get_conversations_dirs():
+    # Scan conversation files (.db / .pb) across both app directories
+    for base_dir, app_tag in get_app_dirs():
+        if app_filter and app_filter != "all":
+            if app_filter == "ide" and app_tag != "ide":
+                continue
+            if app_filter in ("v2", "2.0") and app_tag != "v2":
+                continue
+
+        conv_dir = base_dir / "conversations"
+        if not conv_dir.is_dir():
+            continue
+
         try:
             for entry in os.scandir(conv_dir):
                 if not entry.is_file():
@@ -144,25 +197,43 @@ def scan_disk_conversations() -> dict[str, ConversationSummary]:
                     ws = read_workspace_from_db(p) if name.endswith(".db") else None
                     steps, prompt_text = read_step_count_and_prompt_from_db(p) if name.endswith(".db") else (0, None)
 
-                    known_title = vscdb_titles.get(cid, {}).get("title")
+                    known_title = None
+                    if app_tag == "v2" and cid in v2_summaries:
+                        known_title = v2_summaries[cid].get("title")
+                    elif cid in vscdb_titles:
+                        known_title = vscdb_titles[cid].get("title")
 
                     title = known_title or prompt_text or f"Session {cid[:8]}"
                     preview = prompt_text or (ws if ws else "")
 
-                    results[cid] = ConversationSummary(
-                        id=cid,
-                        title=title,
-                        preview=preview,
-                        step_count=steps,
-                        last_modified_time=mtime,
-                        workspace=ws,
-                        source="disk",
-                    )
+                    if cid in results:
+                        results[cid].app_target = "both"
+                    else:
+                        results[cid] = ConversationSummary(
+                            id=cid,
+                            title=title,
+                            preview=preview,
+                            step_count=steps,
+                            last_modified_time=mtime,
+                            workspace=ws,
+                            source="disk",
+                            app_target=app_tag,
+                        )
         except OSError:
             continue
 
     # Augment details from brain transcripts
-    for brain_dir in get_brain_dirs():
+    for base_dir, app_tag in get_app_dirs():
+        if app_filter and app_filter != "all":
+            if app_filter == "ide" and app_tag != "ide":
+                continue
+            if app_filter in ("v2", "2.0") and app_tag != "v2":
+                continue
+
+        brain_dir = base_dir / "brain"
+        if not brain_dir.is_dir():
+            continue
+
         try:
             for item in os.scandir(brain_dir):
                 if not item.is_dir():
@@ -173,8 +244,13 @@ def scan_disk_conversations() -> dict[str, ConversationSummary]:
                     continue
 
                 first_input, first_ts, last_ts, total_steps = _extract_transcript_meta(log_file)
+                known_title = None
+                if app_tag == "v2" and cid in v2_summaries:
+                    known_title = v2_summaries[cid].get("title")
+                elif cid in vscdb_titles:
+                    known_title = vscdb_titles[cid].get("title")
+
                 if cid not in results:
-                    known_title = vscdb_titles.get(cid, {}).get("title")
                     title = known_title or first_input or f"Session {cid[:8]}"
                     results[cid] = ConversationSummary(
                         id=cid,
@@ -184,6 +260,7 @@ def scan_disk_conversations() -> dict[str, ConversationSummary]:
                         created_time=first_ts,
                         last_modified_time=last_ts,
                         source="disk",
+                        app_target=app_tag,
                     )
                 else:
                     item_summary = results[cid]
@@ -194,8 +271,8 @@ def scan_disk_conversations() -> dict[str, ConversationSummary]:
                     if last_ts and (not item_summary.last_modified_time or last_ts > item_summary.last_modified_time):
                         item_summary.last_modified_time = last_ts
                     if not item_summary.title or item_summary.title.startswith("Session "):
-                        if cid in vscdb_titles:
-                            item_summary.title = vscdb_titles[cid]["title"]
+                        if known_title:
+                            item_summary.title = known_title
                         elif first_input:
                             item_summary.title = first_input
         except OSError:
@@ -239,8 +316,15 @@ def _extract_transcript_meta(path: Path) -> tuple[str, Optional[str], Optional[s
     return first_input, first_ts, last_ts, count
 
 
-def read_transcript_lines(cascade_id: str) -> list[dict[str, Any]]:
-    for brain_dir in get_brain_dirs():
+def read_transcript_lines(cascade_id: str, app_target: Optional[str] = None) -> list[dict[str, Any]]:
+    app_dirs = get_app_dirs()
+    if app_target in ("ide", "antigravity-ide"):
+        app_dirs = [(BASE_DIR_IDE, "ide")]
+    elif app_target in ("v2", "antigravity"):
+        app_dirs = [(BASE_DIR_V2, "v2")]
+
+    for base_dir, _ in app_dirs:
+        brain_dir = base_dir / "brain"
         log_file = brain_dir / cascade_id / ".system_generated" / "logs" / "transcript_full.jsonl"
         if not log_file.is_file():
             log_file = brain_dir / cascade_id / ".system_generated" / "logs" / "transcript.jsonl"

@@ -39,6 +39,7 @@ class ConversationSummary:
     workspace: Optional[str] = None
     source: str = "disk"  # "api" or "disk"
     model: Optional[str] = None
+    app_target: str = "ide"  # "ide", "v2", or "both"
 
 
 @dataclass
@@ -48,3 +49,17 @@ class LanguageServerEndpoint:
     csrf_token: str
     workspace_id: Optional[str] = None
     app_data_dir: Optional[str] = None
+
+    @property
+    def is_ide(self) -> bool:
+        return self.app_data_dir == "antigravity-ide"
+
+    @property
+    def is_v2(self) -> bool:
+        return self.app_data_dir == "antigravity"
+
+    @property
+    def app_name(self) -> str:
+        if self.is_v2:
+            return "Antigravity 2.0"
+        return "Antigravity IDE"
